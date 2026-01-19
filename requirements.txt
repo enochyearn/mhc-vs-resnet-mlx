@@ -1,0 +1,5 @@
+mlx>=0.30.3
+mlx-metal>=0.30.3
+numpy>=2.0.0
+matplotlib>=3.9.0
+tqdm>=4.66.0

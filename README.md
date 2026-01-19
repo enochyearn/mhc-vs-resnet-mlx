@@ -26,6 +26,14 @@ python main.py --mode mhc --depth 100
 python main.py --compare --depth 100
 ```
 
+## What to Expect
+
+When you run the comparison, you will observe:
+
+1. **ResNet**: Stable learning, loss decreases steadily.
+2. **Naive Hyper-Connections**: Gradients likely explode (NaN) or vanish, causing loss to flatline or diverge.
+3. **mHC**: Learning is stable (like ResNet) despite dynamic, learnable connections between all layers.
+
 Plots are saved to `results/`:
 - `comparison_plot.png`
 - `mhc_mixing_matrix.png` (only for mHC)

@@ -129,6 +129,15 @@ def plot_mhc_matrix(model, results_dir=None):
 
     w_final = sinkhorn_knopp(model.mixing_logits)
     mx.eval(w_final)
+    row_sums = mx.sum(w_final, axis=1)
+    col_sums = mx.sum(w_final, axis=0)
+    mx.eval(row_sums, col_sums)
+    row_sums = np.array(row_sums)
+    col_sums = np.array(col_sums)
+
+    print("\n[mHC Check] Matrix Constraints:")
+    print(f"  Max Row Sum: {row_sums.max():.4f} (Should be ~1.0)")
+    print(f"  Max Col Sum: {col_sums.max():.4f} (Should be ~1.0)")
 
     fig, ax = plt.subplots(figsize=(6, 6))
     im = ax.imshow(np.array(w_final), cmap="viridis")

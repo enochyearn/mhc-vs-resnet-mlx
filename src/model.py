@@ -46,6 +46,7 @@ class DeepRunner(nn.Module):
                 inp = current_state
             else:
                 weights = mix_mat[i, : len(history)]
+                # Note: This re-stacks history each layer (O(depth^2)); fine for demo scale.
                 h_stack = mx.stack(history)
                 inp = mx.tensordot(weights, h_stack, axes=([0], [0]))
 

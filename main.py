@@ -16,6 +16,7 @@ def main():
     parser.add_argument("--steps", type=int, default=200)
     parser.add_argument("--width", type=int, default=64)
     parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--seed", type=int, default=42, help="Random seed")
 
     args = parser.parse_args()
 
@@ -25,6 +26,7 @@ def main():
             steps=args.steps,
             width=args.width,
             batch_size=args.batch_size,
+            seed=args.seed,
         )
     else:
         run_experiment(
@@ -33,6 +35,7 @@ def main():
             steps=args.steps,
             width=args.width,
             batch_size=args.batch_size,
+            seed=args.seed,
         )
 
 

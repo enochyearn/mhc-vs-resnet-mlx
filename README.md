@@ -1,0 +1,1 @@
+# Surviving Depth: Stable Hyper-Connections (mHC) vs ResNet

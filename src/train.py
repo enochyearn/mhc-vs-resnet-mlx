@@ -1,3 +1,5 @@
+import json
+import time
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -36,6 +38,74 @@ def first_block_grad(grads):
         if leaf is not None:
             return leaf
     return None
+
+
+def _sanitize_list(values):
+    sanitized = []
+    for value in values:
+        if isinstance(value, (float, np.floating)):
+            if np.isnan(value) or np.isinf(value):
+                sanitized.append(None)
+            else:
+                sanitized.append(float(value))
+        else:
+            sanitized.append(value)
+    return sanitized
+
+
+def save_metrics(histories, config, results_dir=None):
+    results_dir = Path(results_dir) if results_dir else results_dir_path()
+    results_dir.mkdir(parents=True, exist_ok=True)
+
+    timestamp = time.strftime("%Y%m%d-%H%M%S")
+    filename = f"metrics_{timestamp}.json"
+    filepath = results_dir / filename
+
+    summary = {}
+    for mode, history in histories.items():
+        loss_vals = np.array(history["loss"], dtype=np.float64) if history["loss"] else None
+        acc_vals = np.array(history["acc"], dtype=np.float64) if history["acc"] else None
+        grad_vals = (
+            np.array(history["grad_norm"], dtype=np.float64) if history["grad_norm"] else None
+        )
+
+        final_loss = float(loss_vals[-1]) if loss_vals is not None else None
+        final_acc = float(acc_vals[-1]) if acc_vals is not None else None
+
+        max_grad_norm = None
+        if grad_vals is not None:
+            finite_grad = grad_vals[np.isfinite(grad_vals)]
+            if finite_grad.size:
+                max_grad_norm = float(finite_grad.max())
+
+        diverged = False
+        if final_loss is None or not np.isfinite(final_loss):
+            diverged = True
+        if max_grad_norm is not None and max_grad_norm > 1e6:
+            diverged = True
+
+        summary[mode] = {
+            "final_loss": final_loss,
+            "final_acc": final_acc,
+            "max_grad_norm": max_grad_norm,
+            "diverged": diverged,
+        }
+
+    output = {
+        "timestamp": timestamp,
+        "config": config,
+        "summary": summary,
+        "history": {
+            mode: {key: _sanitize_list(vals) for key, vals in history.items()}
+            for mode, history in histories.items()
+        },
+    }
+
+    with open(filepath, "w") as f:
+        json.dump(output, f, indent=2, allow_nan=False)
+
+    print(f"\n[Logs] Metrics saved to {filepath}")
+    return filepath
 
 
 def run_experiment(
@@ -161,6 +231,15 @@ def run_comparison(
     histories = {}
     models = {}
 
+    config = {
+        "depth": depth,
+        "width": width,
+        "steps": steps,
+        "batch_size": batch_size,
+        "seed": seed,
+        "modes": modes,
+    }
+
     for mode in modes:
         history, model = run_experiment(
             mode,
@@ -172,6 +251,8 @@ def run_comparison(
         )
         histories[mode] = history
         models[mode] = model
+
+    save_metrics(histories, config)
 
     plot_path = plot_results(histories)
     mhc_path = None

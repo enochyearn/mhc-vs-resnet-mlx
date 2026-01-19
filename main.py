@@ -1,6 +1,6 @@
 import argparse
 
-from src.train import run_comparison, run_experiment
+from src.train import plot_mhc_matrix, plot_results, run_comparison, run_experiment, save_metrics
 
 
 def main():
@@ -29,7 +29,7 @@ def main():
             seed=args.seed,
         )
     else:
-        run_experiment(
+        history, model = run_experiment(
             args.mode,
             args.depth,
             steps=args.steps,
@@ -37,6 +37,19 @@ def main():
             batch_size=args.batch_size,
             seed=args.seed,
         )
+        config = {
+            "depth": args.depth,
+            "width": args.width,
+            "steps": args.steps,
+            "batch_size": args.batch_size,
+            "seed": args.seed,
+            "modes": [args.mode],
+        }
+        histories = {args.mode: history}
+        save_metrics(histories, config)
+        plot_results(histories)
+        if args.mode == "mhc":
+            plot_mhc_matrix(model)
 
 
 if __name__ == "__main__":

@@ -80,7 +80,7 @@ class FashionMNISTLoader:
                 raise ValueError(f"Invalid image file magic: {magic}")
             count, rows, cols = struct.unpack(">III", f.read(12))
             data = np.frombuffer(f.read(), dtype=np.uint8)
-        data = data.reshape(count, rows, cols).astype(np.float32) / 255.0
+        data = data.reshape(count, rows, cols, 1).astype(np.float32) / 255.0
         return data
 
     def _load_labels(self, path):
@@ -100,10 +100,37 @@ class FashionMNISTLoader:
         cache_path = self.data_dir / "fashion-mnist.npz"
         if cache_path.exists():
             cached = np.load(cache_path)
+            x_train = cached["x_train"]
+            x_test = cached["x_test"]
+
+            updated = False
+            if x_train.ndim == 2 and x_train.shape[1] == 28 * 28:
+                x_train = x_train.reshape(-1, 28, 28, 1)
+                updated = True
+            elif x_train.ndim == 3:
+                x_train = np.expand_dims(x_train, axis=-1)
+                updated = True
+
+            if x_test.ndim == 2 and x_test.shape[1] == 28 * 28:
+                x_test = x_test.reshape(-1, 28, 28, 1)
+                updated = True
+            elif x_test.ndim == 3:
+                x_test = np.expand_dims(x_test, axis=-1)
+                updated = True
+
+            if updated and x_train.ndim == 4 and x_test.ndim == 4:
+                np.savez(
+                    cache_path,
+                    x_train=x_train,
+                    y_train=cached["y_train"],
+                    x_test=x_test,
+                    y_test=cached["y_test"],
+                )
+
             self._data = (
-                mx.array(cached["x_train"]),
+                mx.array(x_train),
                 mx.array(cached["y_train"]),
-                mx.array(cached["x_test"]),
+                mx.array(x_test),
                 mx.array(cached["y_test"]),
             )
             return self._data

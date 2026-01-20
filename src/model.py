@@ -47,12 +47,9 @@ class DeepRunner(nn.Module):
         self.norm_final = nn.GroupNorm(num_groups=groups, dims=width)
         self.head = nn.Linear(width, 10)
 
-        if self.mode in ["hc_naive", "mhc"]:
-            self.mixing_logits = mx.random.normal((num_layers, num_layers)) * 0.01
-            if self.mode == "hc_naive":
-                self.mixing_logits = self.mixing_logits - 4.0
-
         self._init_weights()
+        if self.mode in ["hc_naive", "mhc"]:
+            self._init_mixing_matrix()
 
     def _he_init(self, weight):
         if weight.ndim < 2:
@@ -83,6 +80,11 @@ class DeepRunner(nn.Module):
         if self.head.bias is not None:
             self.head.bias = mx.zeros_like(self.head.bias)
 
+    def _init_mixing_matrix(self):
+        diagonal_bias = mx.eye(self.num_layers) * 4.0
+        noise = mx.random.normal((self.num_layers, self.num_layers)) * 0.05
+        self.mixing_logits = diagonal_bias + noise
+
     def _mixing_matrix(self):
         if self.mode == "mhc":
             return sinkhorn_knopp(self.mixing_logits, iters=self.sinkhorn_iters)
@@ -102,18 +104,14 @@ class DeepRunner(nn.Module):
                 inp = current_state
             else:
                 weights = mix_mat[i, : len(history)]
+                weights = weights / (mx.sum(weights) + 1e-6)
                 # Iterative accumulation avoids materializing a stacked history tensor.
                 inp = history[0] * weights[0]
                 for j in range(1, len(history)):
                     inp = inp + (history[j] * weights[j])
 
             residual = self.blocks[i](inp)
-
-            if self.mode == "resnet":
-                current_state = current_state + residual
-            else:
-                current_state = residual
-
+            current_state = inp + residual
             history.append(current_state)
 
         x = nn.relu(self.norm_final(current_state))

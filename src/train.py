@@ -64,7 +64,8 @@ def save_metrics(histories, config, results_dir=None):
     summary = {}
     for mode, history in histories.items():
         loss_vals = np.array(history["loss"], dtype=np.float64) if history["loss"] else None
-        acc_vals = np.array(history["acc"], dtype=np.float64) if history["acc"] else None
+        acc_series = history.get("test_acc") or history.get("acc") or []
+        acc_vals = np.array(acc_series, dtype=np.float64) if acc_series else None
         grad_vals = (
             np.array(history["grad_norm"], dtype=np.float64) if history["grad_norm"] else None
         )
@@ -108,6 +109,20 @@ def save_metrics(histories, config, results_dir=None):
     return filepath
 
 
+def evaluate(model, loader, batch_size=64):
+    test_iter = loader.get_batches(batch_size, split="test", shuffle=False, repeat=False)
+    losses = []
+    accs = []
+    for bx, by in test_iter:
+        logits = model(bx)
+        loss = mx.mean(nn.losses.cross_entropy(logits, by))
+        acc = mx.mean((mx.argmax(logits, axis=1) == by).astype(mx.float32))
+        mx.eval(loss, acc)
+        losses.append(float(loss.item()))
+        accs.append(float(acc.item()))
+    return float(np.mean(losses)), float(np.mean(accs))
+
+
 def run_experiment(
     mode,
     depth,
@@ -128,49 +143,47 @@ def run_experiment(
 
     value_and_grad = nn.value_and_grad(model, loss_fn)
 
-    @mx.compile
+    # @mx.compile
     def step(bx, by):
-        return value_and_grad(model, bx, by)
+        loss, grads = value_and_grad(model, bx, by)
+        optimizer.update(model, grads)
+        return loss, grads
+
     batch_iter = loader.get_batches(
         batch_size, split="train", shuffle=True, seed=seed, repeat=True
     )
 
-    history = {"loss": [], "acc": [], "grad_norm": []}
+    history = {"loss": [], "test_acc": [], "grad_norm": []}
 
     diverged = False
     log_interval = 10
+    eval_every = 50
+    last_test_acc = 0.0
+
     for i in tqdm(range(steps), desc=mode, leave=True):
         bx, by = next(batch_iter)
 
         loss, grads = step(bx, by)
-        optimizer.update(model, grads)
         mx.eval(model.parameters(), optimizer.state, loss)
 
         loss_val = float(loss.item())
-        check_grad = False
+        grad_norm = None
 
         if i % log_interval == 0 or i == steps - 1:
-            logits = model(bx)
-            acc = mx.mean((mx.argmax(logits, axis=1) == by).astype(mx.float32))
-            mx.eval(acc)
-            acc_val = float(acc.item())
-
             g0 = first_block_grad(grads)
             if g0 is not None:
                 mx.eval(g0)
                 grad_norm = float(np.linalg.norm(np.array(g0)))
-            else:
-                grad_norm = float("nan")
-            check_grad = True
-        else:
-            acc_val = history["acc"][-1] if history["acc"] else 0.0
-            grad_norm = history["grad_norm"][-1] if history["grad_norm"] else 0.0
+
+        if i % eval_every == 0 or i == steps - 1:
+            _, test_acc = evaluate(model, loader, batch_size)
+            last_test_acc = test_acc
 
         history["loss"].append(loss_val)
-        history["acc"].append(acc_val)
+        history["test_acc"].append(last_test_acc)
         history["grad_norm"].append(grad_norm)
 
-        if np.isnan(loss_val) or (check_grad and grad_norm > 1e6):
+        if np.isnan(loss_val) or (grad_norm is not None and grad_norm > 1e6):
             tqdm.write("DIVERGENCE DETECTED")
             diverged = True
             break
@@ -184,9 +197,9 @@ def run_experiment(
 
     if history["loss"]:
         final_loss = history["loss"][-1]
-        final_acc = history["acc"][-1]
+        final_acc = history["test_acc"][-1]
         status = "diverged" if diverged else "ok"
-        print(f"[{mode}] Final loss {final_loss:.4f} | Final acc {final_acc:.4f} | {status}")
+        print(f"[{mode}] Final loss {final_loss:.4f} | Final test acc {final_acc:.4f} | {status}")
 
     return history, model
 
@@ -199,11 +212,14 @@ def plot_results(histories, results_dir=None):
 
     for mode, history in histories.items():
         axes[0].plot(history["loss"], label=mode)
-        axes[1].plot(history["acc"], label=mode)
-        axes[2].plot(history["grad_norm"], label=mode)
+        axes[1].plot(history["test_acc"], label=mode)
+        grad_points = [(i, g) for i, g in enumerate(history["grad_norm"]) if g is not None]
+        if grad_points:
+            gx, gy = zip(*grad_points)
+            axes[2].plot(gx, gy, label=mode)
 
     axes[0].set_title("Training Loss")
-    axes[1].set_title("Training Accuracy")
+    axes[1].set_title("Test Accuracy")
     axes[2].set_title("Gradient Norm (Layer 0)")
     axes[2].set_yscale("log")
 

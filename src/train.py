@@ -198,8 +198,11 @@ def run_experiment(
     if history["loss"]:
         final_loss = history["loss"][-1]
         final_acc = history["test_acc"][-1]
-        status = "diverged" if diverged else "ok"
-        print(f"[{mode}] Final loss {final_loss:.4f} | Final test acc {final_acc:.4f} | {status}")
+        diverged_flag = "Yes" if diverged else "No"
+        print(
+            f"[{mode}] Final loss {final_loss:.4f} | Final test acc {final_acc:.4f} | "
+            f"Diverged: {diverged_flag}"
+        )
 
     return history, model
 

@@ -40,7 +40,7 @@ class DeepRunner(nn.Module):
         self.mode = mode
         self.sinkhorn_iters = sinkhorn_iters
 
-        self.stem = nn.Conv2d(1, width, kernel_size=3, padding=1)
+        self.stem = nn.Conv2d(1, width, kernel_size=3, stride=2, padding=1)
         self.blocks = [ResBlock(width) for _ in range(num_layers)]
 
         groups = min(32, max(1, width // 4))
@@ -60,9 +60,7 @@ class DeepRunner(nn.Module):
         if weight.ndim == 2:
             fan_in = weight.shape[1]
         else:
-            fan_in = 1
-            for dim in weight.shape[1:]:
-                fan_in *= dim
+            fan_in = math.prod(weight.shape[1:])
         scale = math.sqrt(2.0 / fan_in)
         return mx.random.normal(weight.shape) * scale
 
@@ -104,9 +102,10 @@ class DeepRunner(nn.Module):
                 inp = current_state
             else:
                 weights = mix_mat[i, : len(history)]
-                # Note: This re-stacks history each layer (O(depth^2)); fine for demo scale.
-                h_stack = mx.stack(history)
-                inp = mx.tensordot(weights, h_stack, axes=([0], [0]))
+                # Iterative accumulation avoids materializing a stacked history tensor.
+                inp = history[0] * weights[0]
+                for j in range(1, len(history)):
+                    inp = inp + (history[j] * weights[j])
 
             residual = self.blocks[i](inp)
 

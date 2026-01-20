@@ -126,41 +126,67 @@ def run_experiment(
         logits = model(bx)
         return mx.mean(nn.losses.cross_entropy(logits, by))
 
-    step_fn = nn.value_and_grad(model, loss_fn)
+    value_and_grad = nn.value_and_grad(model, loss_fn)
+
+    @mx.compile
+    def step(bx, by):
+        return value_and_grad(model, bx, by)
     batch_iter = loader.get_batches(
         batch_size, split="train", shuffle=True, seed=seed, repeat=True
     )
 
     history = {"loss": [], "acc": [], "grad_norm": []}
 
-    for _ in tqdm(range(steps), desc=mode, leave=True):
+    diverged = False
+    log_interval = 10
+    for i in tqdm(range(steps), desc=mode, leave=True):
         bx, by = next(batch_iter)
 
-        loss, grads = step_fn(model, bx, by)
+        loss, grads = step(bx, by)
         optimizer.update(model, grads)
         mx.eval(model.parameters(), optimizer.state, loss)
 
-        logits = model(bx)
-        acc = mx.mean((mx.argmax(logits, axis=1) == by).astype(mx.float32))
-        mx.eval(acc)
-
         loss_val = float(loss.item())
-        acc_val = float(acc.item())
+        check_grad = False
 
-        g0 = first_block_grad(grads)
-        if g0 is not None:
-            mx.eval(g0)
-            grad_norm = float(np.linalg.norm(np.array(g0)))
+        if i % log_interval == 0 or i == steps - 1:
+            logits = model(bx)
+            acc = mx.mean((mx.argmax(logits, axis=1) == by).astype(mx.float32))
+            mx.eval(acc)
+            acc_val = float(acc.item())
+
+            g0 = first_block_grad(grads)
+            if g0 is not None:
+                mx.eval(g0)
+                grad_norm = float(np.linalg.norm(np.array(g0)))
+            else:
+                grad_norm = float("nan")
+            check_grad = True
         else:
-            grad_norm = float("nan")
+            acc_val = history["acc"][-1] if history["acc"] else 0.0
+            grad_norm = history["grad_norm"][-1] if history["grad_norm"] else 0.0
 
         history["loss"].append(loss_val)
         history["acc"].append(acc_val)
         history["grad_norm"].append(grad_norm)
 
-        if np.isnan(loss_val) or grad_norm > 1e6:
+        if np.isnan(loss_val) or (check_grad and grad_norm > 1e6):
             tqdm.write("DIVERGENCE DETECTED")
+            diverged = True
             break
+
+    if not diverged:
+        results_dir = results_dir_path()
+        results_dir.mkdir(parents=True, exist_ok=True)
+        weight_path = results_dir / f"{mode}_depth{depth}_width{width}_seed{seed}.npz"
+        model.save_weights(str(weight_path))
+        print(f"[{mode}] Weights saved to {weight_path}")
+
+    if history["loss"]:
+        final_loss = history["loss"][-1]
+        final_acc = history["acc"][-1]
+        status = "diverged" if diverged else "ok"
+        print(f"[{mode}] Final loss {final_loss:.4f} | Final acc {final_acc:.4f} | {status}")
 
     return history, model
 

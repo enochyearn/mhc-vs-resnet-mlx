@@ -143,11 +143,12 @@ def run_experiment(
 
     value_and_grad = nn.value_and_grad(model, loss_fn)
 
-    # @mx.compile
     def step(bx, by):
         loss, grads = value_and_grad(model, bx, by)
         optimizer.update(model, grads)
         return loss, grads
+    state = [model.state, optimizer.state, mx.random.state]
+    step = mx.compile(step, inputs=state, outputs=state)
 
     batch_iter = loader.get_batches(
         batch_size, split="train", shuffle=True, seed=seed, repeat=True
@@ -156,15 +157,15 @@ def run_experiment(
     history = {"loss": [], "test_acc": [], "grad_norm": []}
 
     diverged = False
-    log_interval = 10
-    eval_every = 50
+    log_interval = 50
+    eval_every = 1000
     last_test_acc = 0.0
 
     for i in tqdm(range(steps), desc=mode, leave=True):
         bx, by = next(batch_iter)
 
         loss, grads = step(bx, by)
-        mx.eval(model.parameters(), optimizer.state, loss)
+        mx.eval(state, loss)
 
         loss_val = float(loss.item())
         grad_norm = None

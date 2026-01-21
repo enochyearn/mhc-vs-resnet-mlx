@@ -21,12 +21,14 @@ class ResBlock(nn.Module):
         groups = min(32, max(1, channels // 4))
         self.norm1 = nn.GroupNorm(num_groups=groups, dims=channels)
         self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.dropout = nn.Dropout(0.1)
         self.norm2 = nn.GroupNorm(num_groups=groups, dims=channels)
         self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
 
     def __call__(self, x):
         y = nn.relu(self.norm1(x))
         y = self.conv1(y)
+        y = self.dropout(y)
         y = nn.relu(self.norm2(y))
         y = self.conv2(y)
         return y
@@ -105,7 +107,7 @@ class DeepRunner(nn.Module):
             else:
                 weights = mix_mat[i, : len(history)]
                 weights = weights / (mx.sum(weights) + 1e-6)
-                # Iterative accumulation avoids materializing a stacked history tensor.
+                # Streaming sum avoids allocating an ever-growing stacked tensor.
                 inp = history[0] * weights[0]
                 for j in range(1, len(history)):
                     inp = inp + (history[j] * weights[j])

@@ -76,7 +76,7 @@ After running `--compare`, you’ll get:
   * `summary`: final loss / final acc / max grad norm / diverged
   * `history`: per-step series for loss, test acc, grad norm
 
-* `{mode}_depth{depth}_width{width}_seed{seed}.npz`
+* `{mode}_depth{depth}_width{width}_seed{seed}.safetensors`
   Saved weights per model (if training did not diverge)
 
 ---

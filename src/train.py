@@ -192,7 +192,7 @@ def run_experiment(
     if not diverged:
         results_dir = results_dir_path()
         results_dir.mkdir(parents=True, exist_ok=True)
-        weight_path = results_dir / f"{mode}_depth{depth}_width{width}_seed{seed}.npz"
+        weight_path = results_dir / f"{mode}_depth{depth}_width{width}_seed{seed}.safetensors"
         model.save_weights(str(weight_path))
         print(f"[{mode}] Weights saved to {weight_path}")
 

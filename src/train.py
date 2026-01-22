@@ -110,6 +110,9 @@ def save_metrics(histories, config, results_dir=None):
 
 
 def evaluate(model, loader, batch_size=64):
+    prev_mode = getattr(model, "training", True)
+    model.train(False)
+
     test_iter = loader.get_batches(batch_size, split="test", shuffle=False, repeat=False)
     losses = []
     accs = []
@@ -120,6 +123,8 @@ def evaluate(model, loader, batch_size=64):
         mx.eval(loss, acc)
         losses.append(float(loss.item()))
         accs.append(float(acc.item()))
+
+    model.train(prev_mode)
     return float(np.mean(losses)), float(np.mean(accs))
 
 

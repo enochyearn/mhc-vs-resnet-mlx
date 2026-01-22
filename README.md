@@ -64,7 +64,7 @@ After running `--compare`, you’ll get:
 
   * training loss
   * test accuracy
-  * **gradient norm (Layer 0 weight, logged every 10 steps)**
+  * **gradient norm (Layer 0 weight, logged every 50 steps)**
 
 * `mhc_mixing_matrix.png` *(mHC only)*
   Heatmap of the learned Sinkhorn routing matrix
@@ -104,6 +104,30 @@ From `results/metrics_20260119-145332.json`:
 
 ---
 
+## Scaling Check (Depth 500)
+
+Run:
+
+```bash
+python main.py --compare --depth 500 --steps 2000 --width 32 --batch-size 32 --seed 42
+```
+
+From `results/metrics_20260121-034822.json`:
+
+| Model    | Final Loss | Final Test Acc | Diverged |
+| -------- | ---------: | -------------: | :------: |
+| ResNet   |     0.7098 |         76.29% |    No    |
+| hc_naive |     0.4415 |         81.01% |    No    |
+| mHC      |     0.5064 |         81.37% |    No    |
+
+mHC also satisfies the Sinkhorn routing constraint:
+
+- `Max Row Sum ≈ 1.0000`
+- `Max Col Sum ≈ 1.0000`
+
+**Takeaway:** at **500 layers**, both Hyper-Connection variants remain stable and reach **~81%** accuracy,
+while ResNet lags behind in this setup.
+
 ## What’s the actual constraint difference?
 
 ### hc_naive (simplex / L1-normalized mixing)
@@ -139,5 +163,40 @@ When running mHC, you’ll also see a check like:
 
 * `comparison_plot.png` uses the **gradient norm of Layer 0 weights** as a cheap stability signal
   (it is not the norm of *all* gradients in the model).
-* Test accuracy is evaluated every 50 steps; intermediate points hold the last evaluated value.
+* Test accuracy is evaluated every 1000 steps; intermediate points hold the last evaluated value.
 * ResNet is usually fastest; `hc_naive` and `mHC` are slower due to mixing computation.
+---
+
+## Roadmap / TODO
+
+### Training recipe improvements (make baselines stronger)
+
+- [ ] Add **LR schedule**: warmup + cosine decay (or step decay)
+- [ ] Add **weight decay** (AdamW-style)
+- [ ] Run longer: report results at **~10–30 epochs** (current runs are mainly “stability stress tests”)
+- [ ] Add basic preprocessing: **mean/std normalization**
+- [ ] Optional: light augmentation (random crop / translate)
+
+### Next experiments (research direction)
+
+**P0 — Long-sequence modeling (highest priority)**  
+Goal: show mHC as a “stable infinite-memory router” when sequence length is the real enemy.
+
+- [ ] Build a 1D sequence version (depth = time) + switch to a long-sequence dataset:
+  - [ ] LRA Pathfinder / Pathfinder-X (1K → 16K) 
+  - [ ] LRA ListOps (2K tokens)
+  - [ ] Synthetic copy / associative recall for ultra-long horizons (10K+)
+- [ ] Compare **RNN/Transformer vs hc_naive vs mHC** as sequence length grows (1k → 10k steps)
+
+**P1 — Deep GNNs (oversmoothing killer)**  
+Goal: go from 5-layer GNN limit → 50–200 layers.
+
+- [ ] Replace message passing aggregation with an mHC-style mixing step
+- [ ] Try on OGB-Arxiv / OGB-Proteins
+- [ ] Metric: accuracy vs depth + oversmoothing diagnostics
+
+**P2 — Flow matching / Neural ODE stability**  
+Goal: show “conservative-ish routing” reduces long-horizon drift/explosion.
+
+- [ ] Toy 2D flows first, then scale up
+- [ ] Compare ResNet block vs mHC block inside long integration

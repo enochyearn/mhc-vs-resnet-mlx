@@ -1,12 +1,16 @@
 # Surviving Depth: Stable Hyper-Connections (mHC) vs ResNet
 
-This repo compares **three deep networks** on **Fashion-MNIST** (MLX):
+This repo compares **five deep networks** on **Fashion-MNIST** (MLX):
 
-- **ResNet** — standard residual baseline
-- **hc_naive** — dense Hyper-Connections with **positive weights + per-layer L1 normalization**
-- **mHC** — dense Hyper-Connections with **causal Sinkhorn routing** (approx doubly-stochastic)
+- **resnet** — standard residual baseline
+- **hc_causal** — dense Hyper-Connections with **positive weights + per-layer L1 normalization** (causal prefix)
+- **mhc_causal** — dense Hyper-Connections with **causal Sinkhorn routing** (approx doubly-stochastic)
+- **hc** — paper-style stream readout/write-in HC (requires `--streams > 1`)
+- **mhc** — paper-style stream readout/write-in mHC (requires `--streams > 1`)
 
 Reference paper: https://arxiv.org/pdf/2512.24880
+
+ResNet ignores `--streams`; stream modes only become meaningful when `--streams > 1`.
 
 ---
 
@@ -15,9 +19,14 @@ Reference paper: https://arxiv.org/pdf/2512.24880
 Dense skip-style routing *can* help deep models, but it can also become unstable when depth increases.
 The core idea here is:
 
-- **hc_naive** only enforces a *local* constraint (each layer mixes past states using a simplex / L1-normalized mixture)
-- **mHC** enforces a *global* structure (Sinkhorn makes the full mixing map approximately doubly-stochastic),
+- **hc_causal** only enforces a *local* constraint (each layer mixes past states using a simplex / L1-normalized mixture)
+- **mhc_causal** enforces a *global* structure (Sinkhorn makes the full mixing map approximately doubly-stochastic),
   then applies it causally (only using the prefix available at each depth)
+
+There are two flavors of HC in this repo:
+
+- **Causal** (`hc_causal`, `mhc_causal`) mixes the depth-history prefix at each layer.
+- **Stream readout/write-in** (`hc`, `mhc`) does Hpre/Hpost per layer, matching Eq.(3).
 
 ---
 
@@ -40,18 +49,33 @@ python main.py --compare --depth 100 --steps 500 --width 64 --batch-size 64 --se
 ### Run a single model
 
 ```bash
-python main.py --mode mhc --depth 100 --steps 500 --width 64 --batch-size 64 --seed 42
+python main.py --mode mhc_causal --depth 100 --steps 500 --width 64 --batch-size 64 --seed 42
+```
+
+### Run a stream readout/write-in model
+
+```bash
+python main.py --mode mhc --streams 4 --depth 100 --steps 500 --width 64 --batch-size 64 --seed 42
 ```
 
 ### Available flags
 
-* `--mode {resnet,hc_naive,mhc}`
+* `--mode {resnet,hc,hc_causal,mhc,mhc_causal}`
 * `--compare` (runs all modes)
 * `--depth` (# residual blocks / layers)
 * `--steps` (training steps)
 * `--width` (channel width)
 * `--batch-size`
 * `--seed`
+* `--streams` (default 1)
+* `--lr`
+* `--weight-decay`
+* `--warmup-steps`
+* `--no-compile` (disable `mx.compile`)
+* `--dropout`
+* `--no-schedule` (disable LR schedule)
+
+ResNet ignores `--streams`; stream modes are intended for `--streams > 1`.
 
 ---
 
@@ -66,18 +90,20 @@ After running `--compare`, you’ll get:
   * test accuracy
   * **gradient norm (Layer 0 weight, logged every 50 steps)**
 
-* `mhc_mixing_matrix.png` *(mHC only)*
+* `mhc_mixing_matrix.png` *(mHC modes only)*
   Heatmap of the learned Sinkhorn routing matrix
 
 * `metrics_YYYYMMDD-HHMMSS.json`
   Full structured run log containing:
 
-  * `config`: depth / steps / width / batch / seed
+  * `config`: depth / steps / width / batch / seed / streams / lr / weight_decay / warmup_steps / compile_step / dropout / use_schedule
   * `summary`: final loss / final acc / max grad norm / diverged
   * `history`: per-step series for loss, test acc, grad norm
 
 * `{mode}_depth{depth}_width{width}_seed{seed}.safetensors`
-  Saved weights per model (if training did not diverge)
+  Saved weights for ResNet runs (if training did not diverge)
+* `{mode}_depth{depth}_width{width}_streams{streams}_seed{seed}.safetensors`
+  Saved weights for HC/mHC modes (if training did not diverge)
 
 ---
 
@@ -89,17 +115,17 @@ Run:
 python main.py --compare --depth 100 --steps 500 --width 64 --batch-size 64 --seed 42
 ```
 
-From `results/metrics_20260119-145332.json`:
+From `results/metrics_20260119-145332.json` (causal modes, `--streams 1`):
 
-| Model    | Final Loss | Final Test Acc | Max Grad Norm | Diverged |
-| -------- | ---------: | -------------: | ------------: | :------: |
-| ResNet   |     0.8477 |         70.19% |        0.7720 |    No    |
-| hc_naive |     0.7155 |         72.19% |        0.9872 |    No    |
-| mHC      |     0.6923 |         73.24% |        0.7273 |    No    |
+| Model      | Final Loss | Final Test Acc | Max Grad Norm | Diverged |
+| ---------- | ---------: | -------------: | ------------: | :------: |
+| resnet     |     0.8477 |         70.19% |        0.7720 |    No    |
+| hc_causal  |     0.7155 |         72.19% |        0.9872 |    No    |
+| mhc_causal |     0.6923 |         73.24% |        0.7273 |    No    |
 
-**Takeaway:** in this run, **mHC is stable and best-performing**.
+**Takeaway:** in this run, **mhc_causal is stable and best-performing**.
 
-> Note: `hc_naive` is still “less structured” than mHC — it may train fine (like here),
+> Note: `hc_causal` is still “less structured” than `mhc_causal` — it may train fine (like here),
 > but can also be less stable depending on depth / seed / settings.
 
 ---
@@ -112,15 +138,15 @@ Run:
 python main.py --compare --depth 500 --steps 2000 --width 32 --batch-size 32 --seed 42
 ```
 
-From `results/metrics_20260121-034822.json`:
+From `results/metrics_20260121-034822.json` (causal modes, `--streams 1`):
 
-| Model    | Final Loss | Final Test Acc | Diverged |
-| -------- | ---------: | -------------: | :------: |
-| ResNet   |     0.7098 |         76.29% |    No    |
-| hc_naive |     0.4415 |         81.01% |    No    |
-| mHC      |     0.5064 |         81.37% |    No    |
+| Model      | Final Loss | Final Test Acc | Diverged |
+| ---------- | ---------: | -------------: | :------: |
+| resnet     |     0.7098 |         76.29% |    No    |
+| hc_causal  |     0.4415 |         81.01% |    No    |
+| mhc_causal |     0.5064 |         81.37% |    No    |
 
-mHC also satisfies the Sinkhorn routing constraint:
+mhc_causal also satisfies the Sinkhorn routing constraint:
 
 - `Max Row Sum ≈ 1.0000`
 - `Max Col Sum ≈ 1.0000`
@@ -130,7 +156,7 @@ while ResNet lags behind in this setup.
 
 ## What’s the actual constraint difference?
 
-### hc_naive (simplex / L1-normalized mixing)
+### hc_causal (simplex / L1-normalized mixing)
 
 For each layer `i`, we take positive weights and normalize over the *available prefix*:
 
@@ -139,9 +165,9 @@ For each layer `i`, we take positive weights and normalize over the *available p
 
 So each layer forms a **convex mixture** over past states.
 
-### mHC (causal Sinkhorn)
+### mhc_causal (causal Sinkhorn)
 
-mHC first projects the full matrix using Sinkhorn-Knopp:
+mhc_causal first projects the full matrix using Sinkhorn-Knopp:
 
 * `W = Sinkhorn(exp(mixing_logits))`
   (approximately **row sums ≈ 1** and **col sums ≈ 1**)
@@ -152,10 +178,22 @@ Then the forward pass still uses the **causal prefix** for layer `i`:
 
 This encourages a globally balanced routing structure while staying causal.
 
-When running mHC, you’ll also see a check like:
+When running mhc_causal (or mhc), you’ll also see a check like:
 
 * `Max Row Sum ≈ 1.0`
 * `Max Col Sum ≈ 1.0`
+
+### hc (stream readout/write-in)
+
+For each layer, we read out a single stream, run the block once, and write back:
+
+* `x_in = sum_s Hpre_l[s] * x_s`
+* `delta = F(x_in)`
+* `x = Hres_l x + Hpost_l^T * delta`
+
+### mhc (stream readout/write-in + Sinkhorn)
+
+Same readout/write-in as above, but with Sinkhorn-constrained `Hres_l`.
 
 ---
 
@@ -164,7 +202,7 @@ When running mHC, you’ll also see a check like:
 * `comparison_plot.png` uses the **gradient norm of Layer 0 weights** as a cheap stability signal
   (it is not the norm of *all* gradients in the model).
 * Test accuracy is evaluated every 1000 steps; intermediate points hold the last evaluated value.
-* ResNet is usually fastest; `hc_naive` and `mHC` are slower due to mixing computation.
+* ResNet is usually fastest; causal and stream HC variants are slower due to mixing computation.
 ---
 
 ## Roadmap / TODO
@@ -186,7 +224,7 @@ Goal: show mHC as a “stable infinite-memory router” when sequence length is 
   - [ ] LRA Pathfinder / Pathfinder-X (1K → 16K) 
   - [ ] LRA ListOps (2K tokens)
   - [ ] Synthetic copy / associative recall for ultra-long horizons (10K+)
-- [ ] Compare **RNN/Transformer vs hc_naive vs mHC** as sequence length grows (1k → 10k steps)
+- [ ] Compare **RNN/Transformer vs hc_causal vs mhc_causal** as sequence length grows (1k → 10k steps)
 
 **P1 — Deep GNNs (oversmoothing killer)**  
 Goal: go from 5-layer GNN limit → 50–200 layers.

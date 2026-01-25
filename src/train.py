@@ -53,6 +53,16 @@ def _sanitize_list(values):
     return sanitized
 
 
+def _sanitize_float(value):
+    if value is None:
+        return None
+    value = float(value)
+    if np.isnan(value) or np.isinf(value):
+        return None
+    return value
+
+
+
 def save_metrics(histories, config, results_dir=None):
     results_dir = Path(results_dir) if results_dir else results_dir_path()
     results_dir.mkdir(parents=True, exist_ok=True)
@@ -70,14 +80,14 @@ def save_metrics(histories, config, results_dir=None):
             np.array(history["grad_norm"], dtype=np.float64) if history["grad_norm"] else None
         )
 
-        final_loss = float(loss_vals[-1]) if loss_vals is not None else None
-        final_acc = float(acc_vals[-1]) if acc_vals is not None else None
+        final_loss = _sanitize_float(loss_vals[-1]) if loss_vals is not None else None
+        final_acc = _sanitize_float(acc_vals[-1]) if acc_vals is not None else None
 
         max_grad_norm = None
         if grad_vals is not None:
             finite_grad = grad_vals[np.isfinite(grad_vals)]
             if finite_grad.size:
-                max_grad_norm = float(finite_grad.max())
+                max_grad_norm = _sanitize_float(finite_grad.max())
 
         diverged = False
         if final_loss is None or not np.isfinite(final_loss):
@@ -128,6 +138,19 @@ def evaluate(model, loader, batch_size=64):
     return float(np.mean(losses)), float(np.mean(accs))
 
 
+def step_lr(step, total_steps, base_lr, warmup_steps=0, use_schedule=True):
+    if warmup_steps > 0 and step < warmup_steps:
+        return base_lr * (step + 1) / warmup_steps
+    if not use_schedule:
+        return base_lr
+    lr = base_lr
+    if step >= int(0.8 * total_steps):
+        lr *= 0.316
+    if step >= int(0.9 * total_steps):
+        lr *= 0.1
+    return lr
+
+
 def run_experiment(
     mode,
     depth,
@@ -135,16 +158,53 @@ def run_experiment(
     width=64,
     batch_size=64,
     seed=0,
+    streams=1,
+    lr=8e-4,
+    weight_decay=0.1,
+    warmup_steps=0,
+    compile_step=True,
+    dropout=0.1,
+    use_schedule=True,
 ):
+    if mode == "resnet":
+        streams = 1
+    mx.random.seed(seed)
+    np.random.seed(seed)
     loader = FashionMNISTLoader()
-    model = DeepRunner(num_layers=depth, width=width, mode=mode)
+    model = DeepRunner(
+        num_layers=depth,
+        width=width,
+        mode=mode,
+        streams=streams,
+        dropout_p=dropout,
+    )
     mx.eval(model.parameters())
 
-    optimizer = optim.Adam(learning_rate=0.001)
+    use_l2 = False
+    try:
+        optimizer = optim.AdamW(learning_rate=lr, weight_decay=weight_decay)
+    except Exception:
+        optimizer = optim.Adam(learning_rate=lr)
+        use_l2 = True
+
+    weight_leaves = []
+    if use_l2 and weight_decay > 0:
+        for leaf in iter_leaves(model.parameters()):
+            if leaf is None:
+                continue
+            if getattr(leaf, "ndim", 0) >= 2:
+                weight_leaves.append(leaf)
 
     def loss_fn(model, bx, by):
         logits = model(bx)
-        return mx.mean(nn.losses.cross_entropy(logits, by))
+        loss = mx.mean(nn.losses.cross_entropy(logits, by))
+        if use_l2 and weight_decay > 0 and weight_leaves:
+            l2 = None
+            for leaf in weight_leaves:
+                term = mx.sum(leaf * leaf)
+                l2 = term if l2 is None else l2 + term
+            loss = loss + 0.5 * weight_decay * l2
+        return loss
 
     value_and_grad = nn.value_and_grad(model, loss_fn)
 
@@ -152,8 +212,11 @@ def run_experiment(
         loss, grads = value_and_grad(model, bx, by)
         optimizer.update(model, grads)
         return loss, grads
-    state = [model.state, optimizer.state, mx.random.state]
-    step = mx.compile(step, inputs=state, outputs=state)
+    if compile_step:
+        state = [model.state, optimizer.state, mx.random.state]
+        step = mx.compile(step, inputs=state, outputs=state)
+    else:
+        state = None
 
     batch_iter = loader.get_batches(
         batch_size, split="train", shuffle=True, seed=seed, repeat=True
@@ -167,10 +230,14 @@ def run_experiment(
     last_test_acc = 0.0
 
     for i in tqdm(range(steps), desc=mode, leave=True):
+        optimizer.learning_rate = step_lr(i, steps, lr, warmup_steps, use_schedule)
         bx, by = next(batch_iter)
 
         loss, grads = step(bx, by)
-        mx.eval(state, loss)
+        if compile_step:
+            mx.eval(state, loss)
+        else:
+            mx.eval(model.parameters(), optimizer.state, loss)
 
         loss_val = float(loss.item())
         grad_norm = None
@@ -197,7 +264,13 @@ def run_experiment(
     if not diverged:
         results_dir = results_dir_path()
         results_dir.mkdir(parents=True, exist_ok=True)
-        weight_path = results_dir / f"{mode}_depth{depth}_width{width}_seed{seed}.safetensors"
+        if mode == "resnet":
+            weight_name = f"{mode}_depth{depth}_width{width}_seed{seed}.safetensors"
+        else:
+            weight_name = (
+                f"{mode}_depth{depth}_width{width}_streams{streams}_seed{seed}.safetensors"
+            )
+        weight_path = results_dir / weight_name
         model.save_weights(str(weight_path))
         print(f"[{mode}] Weights saved to {weight_path}")
 
@@ -248,7 +321,12 @@ def plot_mhc_matrix(model, results_dir=None):
     results_dir = Path(results_dir) if results_dir else results_dir_path()
     results_dir.mkdir(parents=True, exist_ok=True)
 
-    w_final = sinkhorn_knopp(model.mixing_logits)
+    mix_logits = model.mixing_logits
+    if mix_logits.ndim == 3:
+        mix_logits = mix_logits[-1]
+    elif mix_logits.ndim != 2:
+        return None
+    w_final = sinkhorn_knopp(mix_logits)
     mx.eval(w_final)
     row_sums = mx.sum(w_final, axis=1)
     col_sums = mx.sum(w_final, axis=0)
@@ -277,8 +355,15 @@ def run_comparison(
     width=64,
     batch_size=64,
     seed=0,
+    streams=1,
+    lr=8e-4,
+    weight_decay=0.1,
+    warmup_steps=0,
+    compile_step=True,
+    dropout=0.1,
+    use_schedule=True,
 ):
-    modes = modes or ["resnet", "hc_naive", "mhc"]
+    modes = modes or ["resnet", "hc_causal", "mhc_causal", "hc", "mhc"]
     histories = {}
     models = {}
 
@@ -288,6 +373,13 @@ def run_comparison(
         "steps": steps,
         "batch_size": batch_size,
         "seed": seed,
+        "streams": streams,
+        "lr": lr,
+        "weight_decay": weight_decay,
+        "warmup_steps": warmup_steps,
+        "compile_step": compile_step,
+        "dropout": dropout,
+        "use_schedule": use_schedule,
         "modes": modes,
     }
 
@@ -299,6 +391,13 @@ def run_comparison(
             width=width,
             batch_size=batch_size,
             seed=seed,
+            streams=streams,
+            lr=lr,
+            weight_decay=weight_decay,
+            warmup_steps=warmup_steps,
+            compile_step=compile_step,
+            dropout=dropout,
+            use_schedule=use_schedule,
         )
         histories[mode] = history
         models[mode] = model
@@ -307,7 +406,12 @@ def run_comparison(
 
     plot_path = plot_results(histories)
     mhc_path = None
-    if "mhc" in models:
-        mhc_path = plot_mhc_matrix(models["mhc"])
+    mhc_model = None
+    if "mhc_causal" in models:
+        mhc_model = models["mhc_causal"]
+    elif "mhc" in models:
+        mhc_model = models["mhc"]
+    if mhc_model is not None:
+        mhc_path = plot_mhc_matrix(mhc_model)
 
     return histories, models, plot_path, mhc_path

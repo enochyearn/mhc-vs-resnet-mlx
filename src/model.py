@@ -6,6 +6,7 @@ import mlx.nn as nn
 
 def sinkhorn_knopp(log_matrix, iters=5, eps=1e-6):
     """Project log-space weights to a doubly stochastic matrix."""
+    log_matrix = mx.minimum(mx.maximum(log_matrix, -10.0), 10.0)
     m = mx.exp(log_matrix)
     for _ in range(iters):
         m = m / (mx.sum(m, axis=-1, keepdims=True) + eps)
@@ -17,6 +18,14 @@ def softmax(x, axis=-1, eps=1e-9):
     x = x - mx.max(x, axis=axis, keepdims=True)
     e = mx.exp(x)
     return e / (mx.sum(e, axis=axis, keepdims=True) + eps)
+
+
+def sigmoid(x):
+    return 1.0 / (1.0 + mx.exp(-x))
+
+
+def rmsnorm(x, eps=1e-6):
+    return x / mx.sqrt(mx.mean(x * x, axis=-1, keepdims=True) + eps)
 
 
 class ResBlock(nn.Module):
@@ -70,7 +79,7 @@ class DeepRunner(nn.Module):
             self._init_mixing_matrix()
         if self.mode in ["hc", "mhc"]:
             self._init_stream_io()
-            self._init_stream_alpha(alpha_init=0.01)
+            self._init_dynamic_gating(alpha_init=0.01)
 
     def _he_init(self, weight):
         if weight.ndim < 2:
@@ -109,25 +118,34 @@ class DeepRunner(nn.Module):
             return
 
         if self.mode in ["hc", "mhc"]:
-            diagonal_bias = mx.eye(self.streams) * 4.0
+            eye = mx.eye(self.streams)
+            base = eye * 5.0 + (1.0 - eye) * (-5.0)
             noise = mx.random.normal(
                 (self.num_layers, self.streams, self.streams)
-            ) * 0.05
-            self.mixing_logits = diagonal_bias[None, :, :] + noise
+            ) * 0.01
+            self.mixing_logits = base[None, :, :] + noise
 
     def _init_stream_io(self):
-        self.pre_logits = mx.zeros((self.num_layers, self.streams))
-        self.post_logits = mx.zeros((self.num_layers, self.streams))
-        self.readout_logits = mx.zeros((self.streams,))
+        self.pre_logits = mx.full((self.num_layers, self.streams), -5.0)
+        self.post_logits = mx.full((self.num_layers, self.streams), -5.0)
+        self.readout_logits = mx.full((self.streams,), -5.0)
 
         self.pre_logits[:, 0] = 5.0
         self.post_logits[:, 0] = 5.0
         self.readout_logits[0] = 5.0
 
-    def _init_stream_alpha(self, alpha_init=0.01):
-        a = float(alpha_init)
-        alpha_logit_init = math.log(a / (1.0 - a))
-        self.alpha_logits = mx.ones((self.num_layers,)) * alpha_logit_init
+    def _init_dynamic_gating(self, alpha_init=0.01):
+        d = self.streams * self.width
+        scale = 1.0 / math.sqrt(d)
+        self.phi_pre = mx.random.normal((self.num_layers, d, self.streams)) * scale
+        self.phi_post = mx.random.normal((self.num_layers, d, self.streams)) * scale
+        self.phi_res = (
+            mx.random.normal((self.num_layers, d, self.streams * self.streams)) * scale
+        )
+
+        self.alpha_pre = mx.ones((self.num_layers, 1)) * alpha_init
+        self.alpha_post = mx.ones((self.num_layers, 1)) * alpha_init
+        self.alpha_res = mx.ones((self.num_layers, 1)) * alpha_init
 
     def _mixing_matrix(self):
         if self.mode == "mhc_causal":
@@ -137,14 +155,6 @@ class DeepRunner(nn.Module):
         return None
 
     def _stream_weights(self, layer_idx):
-        logits = self.mixing_logits[layer_idx]
-        if self.mode == "mhc":
-            w = sinkhorn_knopp(logits, iters=self.sinkhorn_iters)
-            alpha = 1.0 / (1.0 + mx.exp(-self.alpha_logits[layer_idx]))
-            ident = mx.eye(self.streams)
-            return (1.0 - alpha) * ident + alpha * w
-        if self.mode == "hc":
-            return logits
         return None
 
     def _apply_block(self, block, x):
@@ -158,8 +168,37 @@ class DeepRunner(nn.Module):
         raise ValueError(f"Unexpected input rank: {x.ndim}")
 
     def _mix_streams(self, x, weights):
-        mixed = mx.tensordot(weights, x, axes=([1], [1]))
-        return mx.transpose(mixed, (1, 0, 2, 3, 4))
+        if weights.ndim == 2:
+            mixed = mx.tensordot(weights, x, axes=([1], [1]))
+            return mx.transpose(mixed, (1, 0, 2, 3, 4))
+        if weights.ndim == 3:
+            return mx.sum(
+                weights[:, :, :, None, None, None] * x[:, None, :, :, :, :], axis=2
+            )
+        raise ValueError(f"Unexpected weights shape: {weights.shape}")
+
+    def _compute_stream_mappings(self, layer_idx, current_state):
+        pooled = mx.mean(current_state, axis=(2, 3))
+        x_vec = mx.reshape(pooled, (pooled.shape[0], self.streams * self.width))
+        x_norm = rmsnorm(x_vec)
+
+        pre_dyn = mx.matmul(x_norm, self.phi_pre[layer_idx])
+        post_dyn = mx.matmul(x_norm, self.phi_post[layer_idx])
+        res_dyn = mx.matmul(x_norm, self.phi_res[layer_idx])
+        res_dyn = mx.reshape(res_dyn, (x_norm.shape[0], self.streams, self.streams))
+
+        tilde_pre = self.alpha_pre[layer_idx] * pre_dyn + self.pre_logits[layer_idx]
+        tilde_post = self.alpha_post[layer_idx] * post_dyn + self.post_logits[layer_idx]
+        tilde_res = self.alpha_res[layer_idx] * res_dyn + self.mixing_logits[layer_idx]
+
+        if self.mode == "mhc":
+            h_pre = sigmoid(tilde_pre)
+            h_post = 2.0 * sigmoid(tilde_post)
+            h_res = sinkhorn_knopp(tilde_res, iters=self.sinkhorn_iters)
+        else:
+            h_pre, h_post, h_res = tilde_pre, tilde_post, tilde_res
+
+        return h_pre, h_post, h_res
 
     def _expand_to_streams(self, x):
         if self.streams == 1:
@@ -194,22 +233,20 @@ class DeepRunner(nn.Module):
         elif self.mode in ["hc", "mhc"]:
             current_state = self._expand_to_streams(x)
             for i in range(self.num_layers):
-                h_res = self._stream_weights(i)
-                pre_w = softmax(self.pre_logits[i], axis=0)
-                post_w = softmax(self.post_logits[i], axis=0)
+                h_pre, h_post, h_res = self._compute_stream_mappings(i, current_state)
 
                 x_in = mx.sum(
-                    current_state * pre_w[None, :, None, None, None], axis=1
+                    current_state * h_pre[:, :, None, None, None], axis=1
                 )
                 delta = self.blocks[i](x_in)
 
                 mixed = self._mix_streams(current_state, h_res)
-                write_in = delta[:, None, ...] * post_w[None, :, None, None, None]
+                write_in = delta[:, None, ...] * h_post[:, :, None, None, None]
                 current_state = mixed + write_in
 
         if current_state.ndim == 5:
             if self.mode in ["hc", "mhc"]:
-                readout_w = softmax(self.readout_logits, axis=0)
+                readout_w = sigmoid(self.readout_logits)
                 current_state = mx.sum(
                     current_state * readout_w[None, :, None, None, None], axis=1
                 )

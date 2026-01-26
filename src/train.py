@@ -321,13 +321,40 @@ def plot_mhc_matrix(model, results_dir=None):
     results_dir = Path(results_dir) if results_dir else results_dir_path()
     results_dir.mkdir(parents=True, exist_ok=True)
 
-    mix_logits = model.mixing_logits
-    if mix_logits.ndim == 3:
-        mix_logits = mix_logits[-1]
-    elif mix_logits.ndim != 2:
-        return None
-    w_final = sinkhorn_knopp(mix_logits)
-    mx.eval(w_final)
+    if getattr(model, "mode", None) == "mhc":
+        loader = FashionMNISTLoader()
+        batch_iter = loader.get_batches(16, split="test", shuffle=False, repeat=False)
+        bx, _ = next(batch_iter)
+
+        prev_mode = getattr(model, "training", True)
+        model.train(False)
+        try:
+            current_state = model._expand_to_streams(model.stem(bx))
+            h_res = None
+            for i in range(model.num_layers):
+                h_pre, h_post, h_res = model._compute_stream_mappings(i, current_state)
+                x_in = mx.sum(
+                    current_state * h_pre[:, :, None, None, None], axis=1
+                )
+                delta = model.blocks[i](x_in)
+                mixed = model._mix_streams(current_state, h_res)
+                write_in = delta[:, None, ...] * h_post[:, :, None, None, None]
+                current_state = mixed + write_in
+
+            if h_res is None:
+                return None
+            w_final = mx.mean(h_res, axis=0)
+            mx.eval(w_final)
+        finally:
+            model.train(prev_mode)
+    else:
+        mix_logits = model.mixing_logits
+        if mix_logits.ndim == 3:
+            mix_logits = mix_logits[-1]
+        elif mix_logits.ndim != 2:
+            return None
+        w_final = sinkhorn_knopp(mix_logits)
+        mx.eval(w_final)
     row_sums = mx.sum(w_final, axis=1)
     col_sums = mx.sum(w_final, axis=0)
     mx.eval(row_sums, col_sums)
